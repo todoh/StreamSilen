@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StreamYard Clone P2P (2 Usuarios) - Auth Fix</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1a1a1a;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        h1 { margin-top: 20px; }
+
+        .videos-container {
+            display: flex;
+            gap: 20px;
+            margin: 20px;
+            width: 90%;
+            max-width: 1200px;
+            justify-content: center;
+        }
+
+        .video-wrapper {
+            position: relative;
+            width: 45%;
+            aspect-ratio: 16/9;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 2px solid #333;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .label {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            cursor: pointer;
+            background-color: #2563eb;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        button:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+        }
+
+        input {
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #555;
+            background: #333;
+            color: white;
+            width: 250px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>StreamYard P2P - 2 Usuarios</h1>
+
+    <div class="videos-container">
+        <div class="video-wrapper">
+            <video id="localVideo" autoplay playsinline muted></video>
+            <div class="label">Tú (Local)</div>
+        </div>
+        <div class="video-wrapper">
+            <video id="remoteVideo" autoplay playsinline></video>
+            <div class="label">Invitado (Remoto)</div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="btnWebcam">1. Encender Cámara</button>
+        <button id="btnCreate" disabled>2. Crear Sala</button>
+        <input type="text" id="callInput" placeholder="ID de la llamada para unirse..." />
+        <button id="btnJoin" disabled>3. Unirse a Sala</button>
+        <button id="btnHangup" disabled>Colgar</button>
+    </div>
+
+    <p id="statusText" style="color: #aaa; font-style: italic;">Estado: Inicializando Firebase...</p>
+
+    <script type="module">
+        // Importar funciones SDK v9 necesarias
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-app.js";
+        import { 
+            getFirestore, 
+            collection, 
+            doc, 
+            addDoc, 
+            setDoc, 
+            getDoc, 
+            onSnapshot, 
+            updateDoc 
+        } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore.js";
+        // IMPORTANTE: Importamos Auth para evitar error de permisos
+        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-auth.js";
+
+        // --- 1. Configuración de Firebase (TUS DATOS) ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyBxlmzjYjOEAwc_DVtFpt9DnN7XnuRkbKw",
+            authDomain: "silenos-fc5e5.firebaseapp.com",
+            databaseURL: "https://silenos-fc5e5-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "silenos-fc5e5",
+            storageBucket: "silenos-fc5e5.firebasestorage.app",
+            messagingSenderId: "314671855826",
+            appId: "1:314671855826:web:ea0af5cd962baa1fd6150b",
+            measurementId: "G-V636CRYZ8X"
+        };
+
+        // Inicializar Firebase
+        const app = initializeApp(firebaseConfig);
+        const firestore = getFirestore(app);
+        const auth = getAuth(app);
+
+        // --- 2. Variables Globales y Configuración WebRTC ---
+        const servers = {
+            iceServers: [
+                {
+                    urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302']
+                }
+            ],
+            iceCandidatePoolSize: 10,
+        };
+
+        // Estado global
+        let pc = new RTCPeerConnection(servers);
+        let localStream = null;
+        let remoteStream = null;
+
+        // Elementos HTML
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const btnWebcam = document.getElementById('btnWebcam');
+        const btnCreate = document.getElementById('btnCreate');
+        const btnJoin = document.getElementById('btnJoin');
+        const btnHangup = document.getElementById('btnHangup');
+        const callInput = document.getElementById('callInput');
+        const statusText = document.getElementById('statusText');
+
+        // --- 3. Autenticación Anónima Automática ---
+        // Esto asegura que tenemos permiso antes de intentar nada
+        signInAnonymously(auth)
+            .then(() => {
+                statusText.innerText = "Estado: Conectado a Firebase. Esperando cámara...";
+                console.log("Usuario autenticado anónimamente en Firebase");
+            })
+            .catch((error) => {
+                statusText.innerText = "Error crítico: Fallo de autenticación en Firebase.";
+                console.error("Error Auth:", error);
+            });
+
+
+        // --- 4. Funciones Principales ---
+
+        // A. Iniciar Webcam
+        btnWebcam.onclick = async () => {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localVideo.srcObject = localStream;
+                
+                // Añadir pistas al PeerConnection
+                localStream.getTracks().forEach((track) => {
+                    pc.addTrack(track, localStream);
+                });
+
+                // Preparar stream remoto
+                remoteStream = new MediaStream();
+                remoteVideo.srcObject = remoteStream;
+
+                // Evento: Cuando llega un track remoto
+                pc.ontrack = (event) => {
+                    event.streams[0].getTracks().forEach((track) => {
+                        remoteStream.addTrack(track);
+                    });
+                };
+
+                btnWebcam.disabled = true;
+                btnCreate.disabled = false;
+                btnJoin.disabled = false;
+                statusText.innerText = "Estado: Cámara lista. Crea una sala o únete a una.";
+            } catch (error) {
+                console.error("Error al acceder a medios:", error);
+                statusText.innerText = "Error: No se pudo acceder a la cámara/micrófono.";
+            }
+        };
+
+        // B. Crear Sala (Host)
+        btnCreate.onclick = async () => {
+            btnCreate.disabled = true;
+            btnJoin.disabled = true;
+            statusText.innerText = "Estado: Creando oferta...";
+
+            // Referencia al documento de la llamada en Firestore
+            const callDoc = doc(collection(firestore, 'calls'));
+            const offerCandidates = collection(callDoc, 'offerCandidates');
+            const answerCandidates = collection(callDoc, 'answerCandidates');
+
+            callInput.value = callDoc.id; // Mostrar ID para copiar
+
+            // Evento ICE: Guardar candidatos locales en Firestore
+            pc.onicecandidate = (event) => {
+                if(event.candidate) {
+                    addDoc(offerCandidates, event.candidate.toJSON());
+                }
+            };
+
+            // Crear Oferta SDP
+            const offerDescription = await pc.createOffer();
+            await pc.setLocalDescription(offerDescription);
+
+            const offer = {
+                sdp: offerDescription.sdp,
+                type: offerDescription.type,
+            };
+
+            // Guardar oferta en Firestore
+            await setDoc(callDoc, { offer });
+            statusText.innerText = `Estado: Sala creada. Copia el ID (${callDoc.id}) y mándalo al invitado.`;
+
+            // Escuchar cambios en el documento (Esperar Respuesta)
+            onSnapshot(callDoc, (snapshot) => {
+                const data = snapshot.data();
+                if (!pc.currentRemoteDescription && data?.answer) {
+                    const answerDescription = new RTCSessionDescription(data.answer);
+                    pc.setRemoteDescription(answerDescription);
+                    statusText.innerText = "Estado: Conexión establecida.";
+                }
+            });
+
+            // Escuchar candidatos ICE remotos (Respuesta)
+            onSnapshot(answerCandidates, (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === 'added') {
+                        const candidate = new RTCIceCandidate(change.doc.data());
+                        pc.addIceCandidate(candidate);
+                    }
+                });
+            });
+            
+            btnHangup.disabled = false;
+        };
+
+        // C. Unirse a Sala (Invitado)
+        btnJoin.onclick = async () => {
+            const callId = callInput.value;
+            if(!callId) {
+                alert("Por favor introduce un ID de sala");
+                return;
+            }
+
+            btnCreate.disabled = true;
+            btnJoin.disabled = true;
+            statusText.innerText = "Estado: Conectando a sala...";
+
+            const callDoc = doc(firestore, 'calls', callId);
+            const answerCandidates = collection(callDoc, 'answerCandidates');
+            const offerCandidates = collection(callDoc, 'offerCandidates');
+
+            // Evento ICE: Guardar candidatos locales (Respuesta)
+            pc.onicecandidate = (event) => {
+                if(event.candidate) {
+                    addDoc(answerCandidates, event.candidate.toJSON());
+                }
+            };
+
+            // Obtener datos de la oferta
+            const callSnapshot = await getDoc(callDoc);
+            const callData = callSnapshot.data();
+
+            if(!callData) {
+                alert("La sala no existe");
+                location.reload();
+                return;
+            }
+
+            const offerDescription = callData.offer;
+            await pc.setRemoteDescription(new RTCSessionDescription(offerDescription));
+
+            // Crear Respuesta SDP
+            const answerDescription = await pc.createAnswer();
+            await pc.setLocalDescription(answerDescription);
+
+            const answer = {
+                type: answerDescription.type,
+                sdp: answerDescription.sdp,
+            };
+
+            // Subir respuesta a Firestore
+            await updateDoc(callDoc, { answer });
+
+            // Escuchar candidatos ICE remotos (Oferta)
+            onSnapshot(offerCandidates, (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === 'added') {
+                        const candidate = new RTCIceCandidate(change.doc.data());
+                        pc.addIceCandidate(candidate);
+                    }
+                });
+            });
+
+            btnHangup.disabled = false;
+            statusText.innerText = "Estado: Conectado.";
+        };
+
+        // D. Colgar (Simple reload)
+        btnHangup.onclick = () => {
+            // En una app real, limpiarías la DB. Aquí recargamos para resetear.
+            window.location.reload();
+        }
+
+    </script>
+</body>
+</html>
